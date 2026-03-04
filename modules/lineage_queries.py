@@ -3,7 +3,7 @@ lineage_queries.py — Toutes les requêtes SQL pour le Data Lineage
 Sources: ACCOUNT_USAGE.OBJECT_DEPENDENCIES, INFORMATION_SCHEMA, QUERY_HISTORY
 """
 import pandas as pd
-from modules.snowflake_client import run_sql, run_sql_no_cache
+from modules.snowflake_client import run_sql, run_sql_no_cache, get_session
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -98,6 +98,14 @@ def _parse_lineage_df(df: pd.DataFrame, direction: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _exec(sql: str) -> pd.DataFrame:
+    """Exécute directement via session (bypass cache — obligatoire pour lineage)."""
+    session = get_session()
+    df = session.sql(sql).to_pandas()
+    df.columns = [c.upper().strip('"') for c in df.columns]
+    return df
+
+
 def get_upstream_dependencies(
     database: str,
     schema: str,
@@ -105,35 +113,38 @@ def get_upstream_dependencies(
     max_depth: int = 3,
 ) -> tuple[pd.DataFrame, list[str]]:
     """
-    Lineage upstream. Retourne (DataFrame, liste_erreurs_diagnostics).
+    Lineage upstream — sans cache, session directe.
     Essaie dans l'ordre :
-      1. SNOWFLAKE.CORE.GET_LINEAGE  (natif, Snowflake ≥ 2024)
-      2. ACCOUNT_USAGE.OBJECT_DEPENDENCIES (droits IMPORTED PRIVILEGES requis)
+      1. SNOWFLAKE.CORE.GET_LINEAGE  (natif Snowflake, args positionnels)
+      2. ACCOUNT_USAGE.OBJECT_DEPENDENCIES (fallback)
     """
     full_name = f"{database}.{schema}.{object_name}"
     errors: list[str] = []
 
-    # ── 1 : GET_LINEAGE (arguments positionnels) ─────────────────────────────
-    for domain in ("Table", "View", "TABLE", "VIEW"):
+    # ── 1 : GET_LINEAGE ───────────────────────────────────────────────────────
+    # Signature réelle : GET_LINEAGE(object_name, object_domain, direction, distance)
+    for domain in ("Table", "View"):
         try:
-            df = run_sql(f"""
+            df = _exec(f"""
                 SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
                        TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
                 FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                    '{full_name}',
-                    '{domain}',
-                    'upstream',
-                    {max_depth}
+                    '{full_name}', '{domain}', 'upstream', {max_depth}
                 ))
             """)
             if not df.empty:
                 return _parse_lineage_df(df, "upstream"), []
         except Exception as e:
-            errors.append(f"GET_LINEAGE({domain}): {e}")
+            msg = str(e)
+            if "Unknown domain" in msg:
+                errors.append(f"GET_LINEAGE: objet '{object_name}' non supporté "
+                               f"(Native App ou objet sans lineage enregistré)")
+                break   # inutile de réessayer avec d'autres domains
+            errors.append(f"GET_LINEAGE({domain}): {msg[:200]}")
 
     # ── 2 : OBJECT_DEPENDENCIES ───────────────────────────────────────────────
     try:
-        df = run_sql(f"""
+        df = _exec(f"""
             SELECT
                 REFERENCED_DATABASE       AS SRC_DB,
                 REFERENCED_SCHEMA         AS SRC_SCHEMA,
@@ -143,8 +154,8 @@ def get_upstream_dependencies(
                 REFERENCING_SCHEMA        AS TGT_SCHEMA,
                 REFERENCING_OBJECT_NAME   AS TGT_OBJECT,
                 REFERENCING_OBJECT_DOMAIN AS TGT_TYPE,
-                1                         AS DEPTH,
-                'CERTAIN'                 AS CONFIDENCE
+                1         AS DEPTH,
+                'CERTAIN' AS CONFIDENCE
             FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
             WHERE UPPER(REFERENCING_DATABASE)   = UPPER('{database}')
               AND UPPER(REFERENCING_SCHEMA)      = UPPER('{schema}')
@@ -153,7 +164,7 @@ def get_upstream_dependencies(
         """)
         return df, errors
     except Exception as e:
-        errors.append(f"OBJECT_DEPENDENCIES: {e}")
+        errors.append(f"OBJECT_DEPENDENCIES: {str(e)[:200]}")
 
     return pd.DataFrame(), errors
 
@@ -164,33 +175,33 @@ def get_downstream_dependencies(
     object_name: str,
     max_depth: int = 3,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Lineage downstream. Retourne (DataFrame, liste_erreurs_diagnostics).
-    """
+    """Lineage downstream — sans cache, session directe."""
     full_name = f"{database}.{schema}.{object_name}"
     errors: list[str] = []
 
-    # ── 1 : GET_LINEAGE (arguments positionnels) ─────────────────────────────
-    for domain in ("Table", "View", "TABLE", "VIEW"):
+    # ── 1 : GET_LINEAGE ───────────────────────────────────────────────────────
+    for domain in ("Table", "View"):
         try:
-            df = run_sql(f"""
+            df = _exec(f"""
                 SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
                        TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
                 FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                    '{full_name}',
-                    '{domain}',
-                    'downstream',
-                    {max_depth}
+                    '{full_name}', '{domain}', 'downstream', {max_depth}
                 ))
             """)
             if not df.empty:
                 return _parse_lineage_df(df, "downstream"), []
         except Exception as e:
-            errors.append(f"GET_LINEAGE({domain}): {e}")
+            msg = str(e)
+            if "Unknown domain" in msg:
+                errors.append(f"GET_LINEAGE: objet '{object_name}' non supporté "
+                               f"(Native App ou objet sans lineage enregistré)")
+                break
+            errors.append(f"GET_LINEAGE({domain}): {msg[:200]}")
 
     # ── 2 : OBJECT_DEPENDENCIES ───────────────────────────────────────────────
     try:
-        df = run_sql(f"""
+        df = _exec(f"""
             SELECT
                 REFERENCED_DATABASE       AS SRC_DB,
                 REFERENCED_SCHEMA         AS SRC_SCHEMA,
@@ -200,8 +211,8 @@ def get_downstream_dependencies(
                 REFERENCING_SCHEMA        AS TGT_SCHEMA,
                 REFERENCING_OBJECT_NAME   AS TGT_OBJECT,
                 REFERENCING_OBJECT_DOMAIN AS TGT_TYPE,
-                1                         AS DEPTH,
-                'CERTAIN'                 AS CONFIDENCE
+                1         AS DEPTH,
+                'CERTAIN' AS CONFIDENCE
             FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
             WHERE UPPER(REFERENCED_DATABASE)   = UPPER('{database}')
               AND UPPER(REFERENCED_SCHEMA)      = UPPER('{schema}')
@@ -210,7 +221,7 @@ def get_downstream_dependencies(
         """)
         return df, errors
     except Exception as e:
-        errors.append(f"OBJECT_DEPENDENCIES: {e}")
+        errors.append(f"OBJECT_DEPENDENCIES: {str(e)[:200]}")
 
     return pd.DataFrame(), errors
 

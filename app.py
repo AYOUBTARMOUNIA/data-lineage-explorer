@@ -313,7 +313,16 @@ with tab_graph:
             )
 
     if n_up + n_down == 0:
-        st.info("Aucune dépendance trouvée. Consultez le diagnostic ci-dessus.")
+        # Détecter si c'est une Native App (pas de lineage possible)
+        is_native_app = any("Native App" in e or "non supporté" in e for e in all_errors)
+        if is_native_app:
+            st.warning(
+                f"⚠️ **`{obj}`** appartient à une Native App Snowflake — "
+                "le lineage n'est pas disponible pour ce type d'objet.\n\n"
+                "👉 Sélectionnez une table de votre DWH (ex: schémas ODS, DWH, DMT)."
+            )
+        else:
+            st.info("Aucune dépendance trouvée. Consultez le diagnostic ci-dessus.")
     else:
         graph_html = build_object_graph(
             upstream_df=upstream_df,
