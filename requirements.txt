@@ -1,3 +1,4 @@
-networkx
-pyvis
+# Streamlit in Snowflake — tous les packages ci-dessous
+# sont disponibles nativement, aucune installation requise.
+# Le graphe utilise vis-network via CDN (zéro dépendance Python).
 pandas
