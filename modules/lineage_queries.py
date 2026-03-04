@@ -120,8 +120,8 @@ def get_upstream_dependencies(
                 SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
                        TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
                 FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                    '{domain}',
                     '{full_name}',
+                    '{domain}',
                     'upstream',
                     {max_depth}
                 ))
@@ -177,8 +177,8 @@ def get_downstream_dependencies(
                 SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
                        TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
                 FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                    '{domain}',
                     '{full_name}',
+                    '{domain}',
                     'downstream',
                     {max_depth}
                 ))
