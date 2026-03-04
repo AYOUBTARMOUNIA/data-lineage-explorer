@@ -11,10 +11,13 @@ from modules.snowflake_client import run_sql, run_sql_no_cache
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _col(df: pd.DataFrame, name: str) -> str:
-    """Retourne le nom de colonne exact (insensible à la casse)."""
-    name_lower = name.lower()
+    """
+    Retourne le nom de colonne exact, insensible à la casse et aux
+    guillemets que Snowpark ajoute parfois autour des noms (ex: '"name"').
+    """
+    name_lower = name.lower().strip('"')
     for c in df.columns:
-        if c.lower() == name_lower:
+        if c.lower().strip('"') == name_lower:
             return c
     raise KeyError(f"Colonne '{name}' introuvable dans {list(df.columns)}")
 
