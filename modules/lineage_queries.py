@@ -60,8 +60,43 @@ def get_objects(database: str, schema: str) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LINEAGE OBJET — ACCOUNT_USAGE.OBJECT_DEPENDENCIES
+# LINEAGE OBJET — SNOWFLAKE.CORE.GET_LINEAGE (fonction native Snowflake)
+# Fallback : ACCOUNT_USAGE.OBJECT_DEPENDENCIES (sans récursion)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _parse_lineage_df(df: pd.DataFrame, direction: str) -> pd.DataFrame:
+    """
+    Normalise le résultat de GET_LINEAGE vers le format interne :
+    SRC_DB, SRC_SCHEMA, SRC_OBJECT, SRC_TYPE, TGT_DB, TGT_SCHEMA,
+    TGT_OBJECT, TGT_TYPE, DEPTH, CONFIDENCE
+    """
+    if df.empty:
+        return df
+
+    # Normaliser les noms de colonnes (GET_LINEAGE retourne des majuscules)
+    df.columns = [c.upper().strip('"') for c in df.columns]
+
+    rows = []
+    for _, row in df.iterrows():
+        src_full = str(row.get("SOURCE_OBJECT_NAME", ""))
+        tgt_full = str(row.get("TARGET_OBJECT_NAME", ""))
+        src_parts = src_full.split(".")
+        tgt_parts = tgt_full.split(".")
+
+        rows.append({
+            "SRC_DB":     src_parts[0] if len(src_parts) > 2 else "",
+            "SRC_SCHEMA": src_parts[1] if len(src_parts) > 2 else "",
+            "SRC_OBJECT": src_parts[-1],
+            "SRC_TYPE":   str(row.get("SOURCE_OBJECT_DOMAIN", "TABLE")).upper(),
+            "TGT_DB":     tgt_parts[0] if len(tgt_parts) > 2 else "",
+            "TGT_SCHEMA": tgt_parts[1] if len(tgt_parts) > 2 else "",
+            "TGT_OBJECT": tgt_parts[-1],
+            "TGT_TYPE":   str(row.get("TARGET_OBJECT_DOMAIN", "TABLE")).upper(),
+            "DEPTH":      int(row.get("DISTANCE", 1)),
+            "CONFIDENCE": "CERTAIN",
+        })
+    return pd.DataFrame(rows)
+
 
 def get_upstream_dependencies(
     database: str,
@@ -70,13 +105,35 @@ def get_upstream_dependencies(
     max_depth: int = 3,
 ) -> pd.DataFrame:
     """
-    Lineage upstream : de quels objets dépend l'objet sélectionné ?
-    Utilise OBJECT_DEPENDENCIES (Snowflake natif).
-    Confiance : CERTAIN (source directe).
+    Lineage upstream via SNOWFLAKE.CORE.GET_LINEAGE (natif Snowflake).
+    Fallback sur OBJECT_DEPENDENCIES si GET_LINEAGE indisponible.
     """
-    df = run_sql(f"""
-        WITH RECURSIVE upstream AS (
-            -- Niveau 0 : dépendances directes
+    full_name = f"{database}.{schema}.{object_name}"
+
+    # ── Essai 1 : GET_LINEAGE (fonction native) ───────────────────────────────
+    try:
+        df = run_sql(f"""
+            SELECT
+                SOURCE_OBJECT_DOMAIN,
+                SOURCE_OBJECT_NAME,
+                TARGET_OBJECT_DOMAIN,
+                TARGET_OBJECT_NAME,
+                DISTANCE
+            FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
+                OBJECT_DOMAIN => 'TABLE',
+                OBJECT_NAME   => '{full_name}',
+                DIRECTION     => 'UPSTREAM',
+                DISTANCE      => {max_depth}
+            ))
+        """)
+        if not df.empty:
+            return _parse_lineage_df(df, "upstream")
+    except Exception:
+        pass  # Fallback si GET_LINEAGE non disponible
+
+    # ── Essai 2 : OBJECT_DEPENDENCIES (sans récursion) ────────────────────────
+    try:
+        df = run_sql(f"""
             SELECT
                 REFERENCED_DATABASE      AS SRC_DB,
                 REFERENCED_SCHEMA        AS SRC_SCHEMA,
@@ -86,38 +143,17 @@ def get_upstream_dependencies(
                 REFERENCING_SCHEMA       AS TGT_SCHEMA,
                 REFERENCING_OBJECT_NAME  AS TGT_OBJECT,
                 REFERENCING_OBJECT_DOMAIN AS TGT_TYPE,
-                1 AS DEPTH,
-                'CERTAIN' AS CONFIDENCE
+                1                        AS DEPTH,
+                'CERTAIN'                AS CONFIDENCE
             FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
             WHERE UPPER(REFERENCING_DATABASE)   = UPPER('{database}')
               AND UPPER(REFERENCING_SCHEMA)      = UPPER('{schema}')
               AND UPPER(REFERENCING_OBJECT_NAME) = UPPER('{object_name}')
-
-            UNION ALL
-
-            -- Niveaux suivants (récursion)
-            SELECT
-                d.REFERENCED_DATABASE,
-                d.REFERENCED_SCHEMA,
-                d.REFERENCED_OBJECT_NAME,
-                d.REFERENCED_OBJECT_DOMAIN,
-                d.REFERENCING_DATABASE,
-                d.REFERENCING_SCHEMA,
-                d.REFERENCING_OBJECT_NAME,
-                d.REFERENCING_OBJECT_DOMAIN,
-                u.DEPTH + 1,
-                'CERTAIN'
-            FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES d
-            INNER JOIN upstream u
-                ON UPPER(d.REFERENCING_DATABASE)   = UPPER(u.SRC_DB)
-               AND UPPER(d.REFERENCING_SCHEMA)      = UPPER(u.SRC_SCHEMA)
-               AND UPPER(d.REFERENCING_OBJECT_NAME) = UPPER(u.SRC_OBJECT)
-            WHERE u.DEPTH < {max_depth}
-        )
-        SELECT DISTINCT * FROM upstream
-        ORDER BY DEPTH, SRC_OBJECT
-    """)
-    return df
+            ORDER BY SRC_OBJECT
+        """)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 def get_downstream_dependencies(
@@ -127,10 +163,35 @@ def get_downstream_dependencies(
     max_depth: int = 3,
 ) -> pd.DataFrame:
     """
-    Lineage downstream : quels objets dépendent de l'objet sélectionné ?
+    Lineage downstream via SNOWFLAKE.CORE.GET_LINEAGE (natif Snowflake).
+    Fallback sur OBJECT_DEPENDENCIES si GET_LINEAGE indisponible.
     """
-    df = run_sql(f"""
-        WITH RECURSIVE downstream AS (
+    full_name = f"{database}.{schema}.{object_name}"
+
+    # ── Essai 1 : GET_LINEAGE ─────────────────────────────────────────────────
+    try:
+        df = run_sql(f"""
+            SELECT
+                SOURCE_OBJECT_DOMAIN,
+                SOURCE_OBJECT_NAME,
+                TARGET_OBJECT_DOMAIN,
+                TARGET_OBJECT_NAME,
+                DISTANCE
+            FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
+                OBJECT_DOMAIN => 'TABLE',
+                OBJECT_NAME   => '{full_name}',
+                DIRECTION     => 'DOWNSTREAM',
+                DISTANCE      => {max_depth}
+            ))
+        """)
+        if not df.empty:
+            return _parse_lineage_df(df, "downstream")
+    except Exception:
+        pass
+
+    # ── Essai 2 : OBJECT_DEPENDENCIES ────────────────────────────────────────
+    try:
+        df = run_sql(f"""
             SELECT
                 REFERENCED_DATABASE      AS SRC_DB,
                 REFERENCED_SCHEMA        AS SRC_SCHEMA,
@@ -140,37 +201,17 @@ def get_downstream_dependencies(
                 REFERENCING_SCHEMA       AS TGT_SCHEMA,
                 REFERENCING_OBJECT_NAME  AS TGT_OBJECT,
                 REFERENCING_OBJECT_DOMAIN AS TGT_TYPE,
-                1 AS DEPTH,
-                'CERTAIN' AS CONFIDENCE
+                1                        AS DEPTH,
+                'CERTAIN'                AS CONFIDENCE
             FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
             WHERE UPPER(REFERENCED_DATABASE)   = UPPER('{database}')
               AND UPPER(REFERENCED_SCHEMA)      = UPPER('{schema}')
               AND UPPER(REFERENCED_OBJECT_NAME) = UPPER('{object_name}')
-
-            UNION ALL
-
-            SELECT
-                d.REFERENCED_DATABASE,
-                d.REFERENCED_SCHEMA,
-                d.REFERENCED_OBJECT_NAME,
-                d.REFERENCED_OBJECT_DOMAIN,
-                d.REFERENCING_DATABASE,
-                d.REFERENCING_SCHEMA,
-                d.REFERENCING_OBJECT_NAME,
-                d.REFERENCING_OBJECT_DOMAIN,
-                dn.DEPTH + 1,
-                'CERTAIN'
-            FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES d
-            INNER JOIN downstream dn
-                ON UPPER(d.REFERENCED_DATABASE)   = UPPER(dn.TGT_DB)
-               AND UPPER(d.REFERENCED_SCHEMA)      = UPPER(dn.TGT_SCHEMA)
-               AND UPPER(d.REFERENCED_OBJECT_NAME) = UPPER(dn.TGT_OBJECT)
-            WHERE dn.DEPTH < {max_depth}
-        )
-        SELECT DISTINCT * FROM downstream
-        ORDER BY DEPTH, TGT_OBJECT
-    """)
-    return df
+            ORDER BY TGT_OBJECT
+        """)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
