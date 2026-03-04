@@ -22,6 +22,22 @@ from modules.lineage_queries import (
 )
 from modules.graph_builder import build_object_graph, build_column_graph
 
+
+# ── Helper utilitaire (doit être défini avant tout appel) ─────────────────────
+def _fmt_bytes(b) -> str:
+    if not b:
+        return "—"
+    try:
+        b = float(b)
+    except (TypeError, ValueError):
+        return "—"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} PB"
+
+
 # ── Setup page ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Data Lineage Explorer",
@@ -237,14 +253,7 @@ m3.metric("Dernière modif.", last_alt)
 m4.metric("Commentaire", comment[:30] + "…" if len(str(comment)) > 30 else comment)
 
 
-def _fmt_bytes(b):
-    if not b:
-        return "—"
-    for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if b < 1024:
-            return f"{b:.1f} {unit}"
-        b /= 1024
-    return f"{b:.1f} PB"
+# (_fmt_bytes défini en haut du fichier)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
