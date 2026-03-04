@@ -10,9 +10,6 @@ from modules.snowflake_client import run_sql, run_sql_no_cache
 # NAVIGATION : DB / Schema / Objects
 # ══════════════════════════════════════════════════════════════════════════════
 
-@run_cached := None  # Annotation helper (non utilisé, voir ci-dessous)
-
-
 def get_databases() -> list[str]:
     """Liste toutes les bases de données accessibles."""
     df = run_sql("SHOW DATABASES")
