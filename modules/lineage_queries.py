@@ -10,10 +10,22 @@ from modules.snowflake_client import run_sql, run_sql_no_cache
 # NAVIGATION : DB / Schema / Objects
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _col(df: pd.DataFrame, name: str) -> str:
+    """Retourne le nom de colonne exact (insensible à la casse)."""
+    name_lower = name.lower()
+    for c in df.columns:
+        if c.lower() == name_lower:
+            return c
+    raise KeyError(f"Colonne '{name}' introuvable dans {list(df.columns)}")
+
+
 def get_databases() -> list[str]:
     """Liste toutes les bases de données accessibles."""
     df = run_sql("SHOW DATABASES")
-    return sorted(df["name"].tolist()) if not df.empty else []
+    if df.empty:
+        return []
+    col = _col(df, "name")
+    return sorted(df[col].tolist())
 
 
 def get_schemas(database: str) -> list[str]:
@@ -21,9 +33,9 @@ def get_schemas(database: str) -> list[str]:
     df = run_sql(f"SHOW SCHEMAS IN DATABASE {database}")
     if df.empty:
         return []
-    # Exclure les schémas système
+    col = _col(df, "name")
     exclude = {"INFORMATION_SCHEMA", "PUBLIC"}
-    return sorted([s for s in df["name"].tolist() if s not in exclude])
+    return sorted([s for s in df[col].tolist() if s.upper() not in exclude])
 
 
 def get_objects(database: str, schema: str) -> pd.DataFrame:
