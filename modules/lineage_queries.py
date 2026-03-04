@@ -113,17 +113,17 @@ def get_upstream_dependencies(
     full_name = f"{database}.{schema}.{object_name}"
     errors: list[str] = []
 
-    # ── 1 : GET_LINEAGE ───────────────────────────────────────────────────────
-    for domain in ("TABLE", "View", "Table"):          # essaie plusieurs casses
+    # ── 1 : GET_LINEAGE (arguments positionnels) ─────────────────────────────
+    for domain in ("Table", "View", "TABLE", "VIEW"):
         try:
             df = run_sql(f"""
                 SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
                        TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
                 FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                    OBJECT_DOMAIN => '{domain}',
-                    OBJECT_NAME   => '{full_name}',
-                    DIRECTION     => 'UPSTREAM',
-                    DISTANCE      => {max_depth}
+                    '{domain}',
+                    '{full_name}',
+                    'upstream',
+                    {max_depth}
                 ))
             """)
             if not df.empty:
@@ -170,17 +170,17 @@ def get_downstream_dependencies(
     full_name = f"{database}.{schema}.{object_name}"
     errors: list[str] = []
 
-    # ── 1 : GET_LINEAGE ───────────────────────────────────────────────────────
-    for domain in ("TABLE", "View", "Table"):
+    # ── 1 : GET_LINEAGE (arguments positionnels) ─────────────────────────────
+    for domain in ("Table", "View", "TABLE", "VIEW"):
         try:
             df = run_sql(f"""
                 SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
                        TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
                 FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                    OBJECT_DOMAIN => '{domain}',
-                    OBJECT_NAME   => '{full_name}',
-                    DIRECTION     => 'DOWNSTREAM',
-                    DISTANCE      => {max_depth}
+                    '{domain}',
+                    '{full_name}',
+                    'downstream',
+                    {max_depth}
                 ))
             """)
             if not df.empty:
