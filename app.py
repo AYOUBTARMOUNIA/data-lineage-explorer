@@ -270,42 +270,54 @@ tab_graph, tab_table, tab_cols, tab_history = st.tabs([
 # ── TAB 1 : Graphe interactif ─────────────────────────────────────────────────
 with tab_graph:
     with st.spinner("Construction du graphe…"):
-        # Upstream
-        upstream_df = pd.DataFrame()
+        upstream_df   = pd.DataFrame()
         downstream_df = pd.DataFrame()
+        all_errors: list[str] = []
 
         if "⬆️" in dir_ or "↕️" in dir_:
-            try:
-                upstream_df = get_upstream_dependencies(db, schema, obj, depth)
-            except Exception as e:
-                warn_box(f"Upstream indisponible (ACCOUNT_USAGE requis) : {e}")
+            upstream_df, errs = get_upstream_dependencies(db, schema, obj, depth)
+            all_errors.extend(errs)
 
         if "⬇️" in dir_ or "↕️" in dir_:
-            try:
-                downstream_df = get_downstream_dependencies(db, schema, obj, depth)
-            except Exception as e:
-                warn_box(f"Downstream indisponible : {e}")
+            downstream_df, errs = get_downstream_dependencies(db, schema, obj, depth)
+            all_errors.extend(errs)
 
     # Stats rapides
-    n_up = len(upstream_df) if not upstream_df.empty else 0
+    n_up   = len(upstream_df)   if not upstream_df.empty   else 0
     n_down = len(downstream_df) if not downstream_df.empty else 0
 
     sc1, sc2, sc3 = st.columns(3)
-    sc1.metric("⬆️ Dépendances upstream", n_up)
+    sc1.metric("⬆️ Dépendances upstream",   n_up)
     sc2.metric("⬇️ Dépendances downstream", n_down)
     sc3.metric("Total edges", n_up + n_down)
 
+    # ── Diagnostic des erreurs ────────────────────────────────────────────────
+    if all_errors:
+        with st.expander("🔍 Diagnostic — erreurs de requêtes (cliquer pour voir)", expanded=(n_up + n_down == 0)):
+            for err in all_errors:
+                st.markdown(
+                    f'<div style="background:#1a0f0f;border-left:3px solid #f87171;'
+                    f'border-radius:0 6px 6px 0;padding:8px 12px;margin:4px 0;'
+                    f'font-family:DM Mono,monospace;font-size:11px;color:#fca5a5">'
+                    f'{err}</div>',
+                    unsafe_allow_html=True,
+                )
+            st.markdown(
+                '<div style="margin-top:10px;font-size:11px;color:#64748b;font-family:DM Mono,monospace">'
+                '💡 <b>Solutions :</b><br>'
+                '• <b>GET_LINEAGE</b> : nécessite Snowflake Enterprise + SNOWFLAKE.CORE accessible<br>'
+                '• <b>OBJECT_DEPENDENCIES</b> : exécuter <code>GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE &lt;ton_role&gt;</code><br>'
+                '• Si ni l\'un ni l\'autre : activer <b>Heuristique Query History</b> dans la sidebar'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
     if n_up + n_down == 0:
-        info_box(
-            "Aucune dépendance trouvée dans OBJECT_DEPENDENCIES. "
-            "Vérifiez que le rôle a accès à SNOWFLAKE.ACCOUNT_USAGE "
-            "ou activez l'heuristique Query History dans la sidebar."
-        )
+        st.info("Aucune dépendance trouvée. Consultez le diagnostic ci-dessus.")
     else:
-        # Rendu graphe
         graph_html = build_object_graph(
-            upstream_df=upstream_df if not upstream_df.empty else pd.DataFrame(),
-            downstream_df=downstream_df if not downstream_df.empty else pd.DataFrame(),
+            upstream_df=upstream_df,
+            downstream_df=downstream_df,
             center_object=full_name,
             center_type=type_badge,
         )
@@ -313,12 +325,12 @@ with tab_graph:
         st.components.v1.html(graph_html, height=600, scrolling=False)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        # Légende confiance
+        src_label = "GET_LINEAGE" if not all_errors else "OBJECT_DEPENDENCIES"
         st.markdown(
             f"""<div style="display:flex;gap:12px;margin-top:8px;font-family:'DM Mono',monospace;font-size:11px;color:#64748b">
               <span>Trait plein = {badge('CERTAIN','CERTAIN')}</span>
               <span>Trait pointillé = {badge('PROBABLE','PROBABLE')}</span>
-              <span>⚙️ Source: OBJECT_DEPENDENCIES</span>
+              <span>⚙️ Source: {src_label}</span>
             </div>""",
             unsafe_allow_html=True,
         )

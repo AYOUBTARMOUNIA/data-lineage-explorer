@@ -103,57 +103,59 @@ def get_upstream_dependencies(
     schema: str,
     object_name: str,
     max_depth: int = 3,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[str]]:
     """
-    Lineage upstream via SNOWFLAKE.CORE.GET_LINEAGE (natif Snowflake).
-    Fallback sur OBJECT_DEPENDENCIES si GET_LINEAGE indisponible.
+    Lineage upstream. Retourne (DataFrame, liste_erreurs_diagnostics).
+    Essaie dans l'ordre :
+      1. SNOWFLAKE.CORE.GET_LINEAGE  (natif, Snowflake ≥ 2024)
+      2. ACCOUNT_USAGE.OBJECT_DEPENDENCIES (droits IMPORTED PRIVILEGES requis)
     """
     full_name = f"{database}.{schema}.{object_name}"
+    errors: list[str] = []
 
-    # ── Essai 1 : GET_LINEAGE (fonction native) ───────────────────────────────
+    # ── 1 : GET_LINEAGE ───────────────────────────────────────────────────────
+    for domain in ("TABLE", "View", "Table"):          # essaie plusieurs casses
+        try:
+            df = run_sql(f"""
+                SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
+                       TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
+                FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
+                    OBJECT_DOMAIN => '{domain}',
+                    OBJECT_NAME   => '{full_name}',
+                    DIRECTION     => 'UPSTREAM',
+                    DISTANCE      => {max_depth}
+                ))
+            """)
+            if not df.empty:
+                return _parse_lineage_df(df, "upstream"), []
+        except Exception as e:
+            errors.append(f"GET_LINEAGE({domain}): {e}")
+
+    # ── 2 : OBJECT_DEPENDENCIES ───────────────────────────────────────────────
     try:
         df = run_sql(f"""
             SELECT
-                SOURCE_OBJECT_DOMAIN,
-                SOURCE_OBJECT_NAME,
-                TARGET_OBJECT_DOMAIN,
-                TARGET_OBJECT_NAME,
-                DISTANCE
-            FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                OBJECT_DOMAIN => 'TABLE',
-                OBJECT_NAME   => '{full_name}',
-                DIRECTION     => 'UPSTREAM',
-                DISTANCE      => {max_depth}
-            ))
-        """)
-        if not df.empty:
-            return _parse_lineage_df(df, "upstream")
-    except Exception:
-        pass  # Fallback si GET_LINEAGE non disponible
-
-    # ── Essai 2 : OBJECT_DEPENDENCIES (sans récursion) ────────────────────────
-    try:
-        df = run_sql(f"""
-            SELECT
-                REFERENCED_DATABASE      AS SRC_DB,
-                REFERENCED_SCHEMA        AS SRC_SCHEMA,
-                REFERENCED_OBJECT_NAME   AS SRC_OBJECT,
-                REFERENCED_OBJECT_DOMAIN AS SRC_TYPE,
-                REFERENCING_DATABASE     AS TGT_DB,
-                REFERENCING_SCHEMA       AS TGT_SCHEMA,
-                REFERENCING_OBJECT_NAME  AS TGT_OBJECT,
+                REFERENCED_DATABASE       AS SRC_DB,
+                REFERENCED_SCHEMA         AS SRC_SCHEMA,
+                REFERENCED_OBJECT_NAME    AS SRC_OBJECT,
+                REFERENCED_OBJECT_DOMAIN  AS SRC_TYPE,
+                REFERENCING_DATABASE      AS TGT_DB,
+                REFERENCING_SCHEMA        AS TGT_SCHEMA,
+                REFERENCING_OBJECT_NAME   AS TGT_OBJECT,
                 REFERENCING_OBJECT_DOMAIN AS TGT_TYPE,
-                1                        AS DEPTH,
-                'CERTAIN'                AS CONFIDENCE
+                1                         AS DEPTH,
+                'CERTAIN'                 AS CONFIDENCE
             FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
             WHERE UPPER(REFERENCING_DATABASE)   = UPPER('{database}')
               AND UPPER(REFERENCING_SCHEMA)      = UPPER('{schema}')
               AND UPPER(REFERENCING_OBJECT_NAME) = UPPER('{object_name}')
             ORDER BY SRC_OBJECT
         """)
-        return df
-    except Exception:
-        return pd.DataFrame()
+        return df, errors
+    except Exception as e:
+        errors.append(f"OBJECT_DEPENDENCIES: {e}")
+
+    return pd.DataFrame(), errors
 
 
 def get_downstream_dependencies(
@@ -161,57 +163,56 @@ def get_downstream_dependencies(
     schema: str,
     object_name: str,
     max_depth: int = 3,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[str]]:
     """
-    Lineage downstream via SNOWFLAKE.CORE.GET_LINEAGE (natif Snowflake).
-    Fallback sur OBJECT_DEPENDENCIES si GET_LINEAGE indisponible.
+    Lineage downstream. Retourne (DataFrame, liste_erreurs_diagnostics).
     """
     full_name = f"{database}.{schema}.{object_name}"
+    errors: list[str] = []
 
-    # ── Essai 1 : GET_LINEAGE ─────────────────────────────────────────────────
+    # ── 1 : GET_LINEAGE ───────────────────────────────────────────────────────
+    for domain in ("TABLE", "View", "Table"):
+        try:
+            df = run_sql(f"""
+                SELECT SOURCE_OBJECT_DOMAIN, SOURCE_OBJECT_NAME,
+                       TARGET_OBJECT_DOMAIN, TARGET_OBJECT_NAME, DISTANCE
+                FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
+                    OBJECT_DOMAIN => '{domain}',
+                    OBJECT_NAME   => '{full_name}',
+                    DIRECTION     => 'DOWNSTREAM',
+                    DISTANCE      => {max_depth}
+                ))
+            """)
+            if not df.empty:
+                return _parse_lineage_df(df, "downstream"), []
+        except Exception as e:
+            errors.append(f"GET_LINEAGE({domain}): {e}")
+
+    # ── 2 : OBJECT_DEPENDENCIES ───────────────────────────────────────────────
     try:
         df = run_sql(f"""
             SELECT
-                SOURCE_OBJECT_DOMAIN,
-                SOURCE_OBJECT_NAME,
-                TARGET_OBJECT_DOMAIN,
-                TARGET_OBJECT_NAME,
-                DISTANCE
-            FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(
-                OBJECT_DOMAIN => 'TABLE',
-                OBJECT_NAME   => '{full_name}',
-                DIRECTION     => 'DOWNSTREAM',
-                DISTANCE      => {max_depth}
-            ))
-        """)
-        if not df.empty:
-            return _parse_lineage_df(df, "downstream")
-    except Exception:
-        pass
-
-    # ── Essai 2 : OBJECT_DEPENDENCIES ────────────────────────────────────────
-    try:
-        df = run_sql(f"""
-            SELECT
-                REFERENCED_DATABASE      AS SRC_DB,
-                REFERENCED_SCHEMA        AS SRC_SCHEMA,
-                REFERENCED_OBJECT_NAME   AS SRC_OBJECT,
-                REFERENCED_OBJECT_DOMAIN AS SRC_TYPE,
-                REFERENCING_DATABASE     AS TGT_DB,
-                REFERENCING_SCHEMA       AS TGT_SCHEMA,
-                REFERENCING_OBJECT_NAME  AS TGT_OBJECT,
+                REFERENCED_DATABASE       AS SRC_DB,
+                REFERENCED_SCHEMA         AS SRC_SCHEMA,
+                REFERENCED_OBJECT_NAME    AS SRC_OBJECT,
+                REFERENCED_OBJECT_DOMAIN  AS SRC_TYPE,
+                REFERENCING_DATABASE      AS TGT_DB,
+                REFERENCING_SCHEMA        AS TGT_SCHEMA,
+                REFERENCING_OBJECT_NAME   AS TGT_OBJECT,
                 REFERENCING_OBJECT_DOMAIN AS TGT_TYPE,
-                1                        AS DEPTH,
-                'CERTAIN'                AS CONFIDENCE
+                1                         AS DEPTH,
+                'CERTAIN'                 AS CONFIDENCE
             FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
             WHERE UPPER(REFERENCED_DATABASE)   = UPPER('{database}')
               AND UPPER(REFERENCED_SCHEMA)      = UPPER('{schema}')
               AND UPPER(REFERENCED_OBJECT_NAME) = UPPER('{object_name}')
             ORDER BY TGT_OBJECT
         """)
-        return df
-    except Exception:
-        return pd.DataFrame()
+        return df, errors
+    except Exception as e:
+        errors.append(f"OBJECT_DEPENDENCIES: {e}")
+
+    return pd.DataFrame(), errors
 
 
 # ══════════════════════════════════════════════════════════════════════════════
